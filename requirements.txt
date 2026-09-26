@@ -1,0 +1,10 @@
+# Python 3.10 - 3.12 consigliato
+acoular>=24.10
+bokeh>=3.4
+numpy
+scipy
+scikit-learn
+sounddevice>=0.4.6
+soundfile
+h5py
+# opzionale (solo per confronto con bf_example_app): spectacoular
