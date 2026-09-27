@@ -6,16 +6,20 @@ from pathlib import Path
 
 import numpy as np
 
-# Posizioni UMA-16 (ordine canali USB) come nel file acoular 'minidsp_uma-16.xml'
-# (griglia 4x4, passo 42 mm, centrata nell'origine, z = 0). Usate se acoular non e' disponibile.
+# Posizioni UMA-16 corrette (ordine canali USB), griglia 4x4 passo 42 mm centrata in (0,0), z = 0.
+# NB: il file acoular 'minidsp_uma-16.xml' ha le x di segno opposto (specchiato); coincide invece con
+# 'minidsp_uma-16_mirrored.xml'. Il file corretto e' in geometries/minidsp_uma-16_corrected.xml
+# e questa tabella e' usata come riserva se il file non si trova.
 UMA16_POS = np.array([
-    [0.021, -0.063], [0.063, -0.063], [0.021, -0.021], [0.063, -0.021],
-    [0.021, 0.021], [0.063, 0.021], [0.021, 0.063], [0.063, 0.063],
-    [-0.063, 0.063], [-0.021, 0.063], [-0.063, 0.021], [-0.021, 0.021],
-    [-0.063, -0.021], [-0.021, -0.021], [-0.063, -0.063], [-0.021, -0.063],
+    [-0.021, -0.063], [-0.063, -0.063], [-0.021, -0.021], [-0.063, -0.021],
+    [-0.021, 0.021], [-0.063, 0.021], [-0.021, 0.063], [-0.063, 0.063],
+    [0.063, 0.063], [0.021, 0.063], [0.063, 0.021], [0.021, 0.021],
+    [0.063, -0.021], [0.021, -0.021], [0.063, -0.063], [0.021, -0.063],
 ]).T  # (2,16)
 
-INTERNAL = 'interna (UMA-16)'
+INTERNAL = 'interna (UMA-16 corretta)'
+DEFAULT_GEOMETRY = 'minidsp_uma-16_corrected.xml'
+PROJECT_XML_DIR = Path(__file__).resolve().parent / 'geometries'
 
 
 def acoular_xml_dir() -> Path | None:
@@ -27,12 +31,28 @@ def acoular_xml_dir() -> Path | None:
 
 
 def available_geometries() -> list[str]:
-    out = [INTERNAL]
+    """File xml del progetto (per primi, compreso quello corretto), poi quelli UMA di acoular, poi la tabella interna."""
+    out = []
+    if PROJECT_XML_DIR.exists():
+        out += sorted(p.name for p in PROJECT_XML_DIR.glob('*.xml'))
     d = acoular_xml_dir()
     if d is not None and d.exists():
-        uma = sorted(p.name for p in d.glob('*.xml') if 'uma' in p.name.lower())
-        out = uma + out
-    return out
+        out += [f'acoular: {p.name}' for p in sorted(d.glob('*.xml')) if 'uma' in p.name.lower()]
+    return out + [INTERNAL]
+
+
+def resolve_geometry(name: str) -> Path | None:
+    """Nome geometria -> percorso file (progetto, poi acoular, poi percorso assoluto)."""
+    if name.startswith('acoular: '):
+        d = acoular_xml_dir()
+        return d / name[len('acoular: '):] if d is not None else None
+    p = Path(name)
+    if p.is_absolute():
+        return p
+    if (PROJECT_XML_DIR / name).exists():
+        return PROJECT_XML_DIR / name
+    d = acoular_xml_dir()
+    return (d / name) if d is not None else None
 
 
 def _read_xml(path: Path) -> np.ndarray:
@@ -44,14 +64,11 @@ def _read_xml(path: Path) -> np.ndarray:
 
 def load_positions(name: str, flip_x=False, flip_y=False, swap_xy=False) -> np.ndarray:
     """Restituisce posizioni microfoni (3, 16) in metri, con trasformazioni di orientamento."""
-    if name == INTERNAL:
-        pos = np.vstack([UMA16_POS, np.zeros((1, 16))])
+    p = None if name.startswith('interna') else resolve_geometry(name)
+    if p is not None and p.exists():
+        pos = _read_xml(p)
     else:
-        p = Path(name)
-        if not p.is_absolute():
-            d = acoular_xml_dir()
-            p = (d / name) if d is not None else p
-        pos = _read_xml(p) if p.exists() else np.vstack([UMA16_POS, np.zeros((1, 16))])
+        pos = np.vstack([UMA16_POS, np.zeros((1, 16))])
     return transform_positions(pos, flip_x, flip_y, swap_xy)
 
 

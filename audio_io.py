@@ -13,9 +13,21 @@ from pathlib import Path
 
 import numpy as np
 
-# Su Windows la UMA-16 espone 16 canali tramite driver ASIO miniDSP (o WASAPI con driver UAC2).
-# Da sounddevice 0.5 il supporto ASIO va abilitato PRIMA dell'import.
-os.environ.setdefault('SD_ENABLE_ASIO', '1')
+# Su Windows la UMA-16 espone 16 canali tramite il driver miniDSP UAC2 (MME / WASAPI / DirectSound)
+# e, se installato il driver ASIO, anche via ASIO. Il supporto ASIO di sounddevice (>= 0.5) va abilitato
+# PRIMA dell'import: lo si attiva solo se richiesto nella configurazione (use_asio), perche' se il driver
+# ASIO non e' caricabile l'apertura del dispositivo fallisce ("Failed to load ASIO driver").
+def _asio_requested() -> bool:
+    try:
+        import json
+        from config import DEFAULT_CONFIG_FILE
+        return bool(json.loads(DEFAULT_CONFIG_FILE.read_text(encoding='utf-8')).get('use_asio', False))
+    except Exception:
+        return False
+
+
+if _asio_requested():
+    os.environ['SD_ENABLE_ASIO'] = '1'
 
 try:
     import sounddevice as sd
@@ -24,6 +36,10 @@ except Exception as exc:  # PortAudio assente
     _SD_ERROR = str(exc)
 else:
     _SD_ERROR = ''
+
+UMA_KEYWORDS = ('uma16', 'uma-16', 'uma 16', 'minidsp', 'mchstreamer')
+# ordine di preferenza delle API audio di Windows (ASIO per ultimo: richiede il suo driver)
+API_PRIORITY = ('wasapi', 'mme', 'directsound', 'wdm-ks', 'asio')
 
 BLOCK_MS = 50
 
@@ -41,24 +57,38 @@ def list_input_devices(min_channels: int = 1) -> list[str]:
     return out
 
 
-def find_uma16(preferred: str = '') -> int | None:
-    """Indice del dispositivo UMA-16 (preferendo ASIO > WASAPI > altri) o quello indicato."""
-    if sd is None:
+def device_id(text: str) -> int | None:
+    """'1', '#1' oppure '1: Linea (UMA16v2) [MME] (16 ch)' -> 1."""
+    t = str(text).strip().lstrip('#')
+    if not t:
         return None
-    if preferred:
-        try:
-            return int(preferred.split(':')[0])
-        except ValueError:
-            pass
+    try:
+        return int(t.split(':')[0].strip())
+    except ValueError:
+        return None
+
+
+def uma16_candidates(preferred: str = '', min_channels: int = 16) -> list[int]:
+    """Dispositivi da provare, in ordine. Se l'utente ne ha indicato uno, solo quello."""
+    if sd is None:
+        return []
+    pid = device_id(preferred)
+    if pid is not None:
+        return [pid]
     hostapis = sd.query_hostapis()
     cands = []
     for i, d in enumerate(sd.query_devices()):
         name = d['name'].lower()
-        if d['max_input_channels'] >= 16 and ('uma' in name or 'minidsp' in name or 'MCHStreamer' in name):
+        if d['max_input_channels'] >= min_channels and any(k in name for k in UMA_KEYWORDS):
             api = hostapis[d['hostapi']]['name'].lower()
-            prio = 0 if 'asio' in api else 1 if 'wasapi' in api else 2
+            prio = next((k for k, a in enumerate(API_PRIORITY) if a in api), len(API_PRIORITY))
             cands.append((prio, i))
-    return sorted(cands)[0][1] if cands else None
+    return [i for _, i in sorted(cands)]
+
+
+def find_uma16(preferred: str = '') -> int | None:
+    c = uma16_candidates(preferred)
+    return c[0] if c else None
 
 
 # ----------------------------------------------------------------------------- sorgenti
@@ -107,24 +137,54 @@ class LiveSource(BaseSource):
     def start(self):
         if sd is None:
             raise RuntimeError(f'sounddevice/PortAudio non disponibile: {_SD_ERROR}')
-        idx = find_uma16(self.device)
-        if idx is None:
-            raise RuntimeError('UMA-16 non trovata: selezionare il dispositivo in "Parametri". '
-                               'Su Windows installare il driver miniDSP (ASIO) per avere 16 canali.')
-        dev = sd.query_devices(idx)
-        nch = min(self.nch, dev['max_input_channels'])
-        self.nch = nch
+        cands = uma16_candidates(self.device)
+        if not cands:
+            raise RuntimeError('UMA-16 non trovata automaticamente: scegliere il dispositivo (es. "1: ...") '
+                               'nel menu "Dispositivo" della scheda Live o Parametri.')
+        errors = []
+        for idx in cands:
+            try:
+                dev = sd.query_devices(idx)
+            except Exception as exc:
+                errors.append(f'#{idx}: {exc}')
+                continue
+            api = sd.query_hostapis(dev['hostapi'])['name']
+            nch = min(self.nch, dev['max_input_channels'])
+            if nch < 1:
+                errors.append(f"#{idx} {dev['name']} [{api}]: nessun canale di ingresso")
+                continue
+            rates = [self.fs] + [r for r in (int(dev['default_samplerate']),) if r != self.fs]
+            for fs in rates:
+                try:
+                    self._open(idx, nch, fs, api)
+                    self.fs = fs
+                    self.nch = nch
+                    self.running = True
+                    warn = '' if nch >= 16 else f' - ATTENZIONE: solo {nch} canali'
+                    self.info = f"#{idx} {dev['name']} [{api}] - {nch} ch @ {fs} Hz{warn}"
+                    if errors:
+                        self.info += f' (scartati: {"; ".join(errors)})'
+                    return
+                except Exception as exc:
+                    errors.append(f"#{idx} {dev['name']} [{api}] @ {fs} Hz: {exc}")
+        raise RuntimeError('nessun dispositivo utilizzabile. Tentativi: ' + ' | '.join(errors))
 
+    def _open(self, idx, nch, fs, api):
         def cb(indata, frames, t, status):
             if status:
                 self.overflows += 1
             self._push(indata.copy())
 
-        self.stream = sd.InputStream(device=idx, channels=nch, samplerate=self.fs, dtype='float32',
-                                     blocksize=int(self.fs * BLOCK_MS / 1000), callback=cb)
-        self.stream.start()
-        self.running = True
-        self.info = f"{dev['name']} - {nch} ch @ {self.fs} Hz"
+        extra = None
+        if 'wasapi' in api.lower():
+            try:
+                extra = sd.WasapiSettings(auto_convert=True)
+            except Exception:
+                extra = None
+        stream = sd.InputStream(device=idx, channels=nch, samplerate=fs, dtype='float32',
+                                blocksize=int(fs * BLOCK_MS / 1000), callback=cb, extra_settings=extra)
+        stream.start()
+        self.stream = stream
 
     def stop(self):
         super().stop()

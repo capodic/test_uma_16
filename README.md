@@ -6,8 +6,8 @@ tracciare in tempo reale una sorgente acustica, in particolare un drone, con l'a
 
 ## Installazione (Windows)
 
-1. Installare il **driver miniDSP UMA-16** (UAC2/ASIO) dal sito miniDSP. Senza driver, Windows può
-   esporre solo 2 canali.
+1. Installare il **driver miniDSP UMA-16** (UAC2) dal sito miniDSP. Senza driver, Windows può
+   esporre solo 2 canali. ASIO è facoltativo.
 2. Python 3.10–3.12, poi, dalla cartella del progetto:
    ```
    pip install -r requirements.txt
@@ -15,8 +15,8 @@ tracciare in tempo reale una sorgente acustica, in particolare un drone, con l'a
 3. Avvio: doppio clic su `avvia_windows.bat`, oppure `python main.py`, oppure `bokeh serve --show main.py`.
    Si apre il browser su http://localhost:5006/.
 
-Il programma cerca automaticamente un dispositivo il cui nome contiene "UMA16" o "miniDSP" con almeno
-16 canali, preferendo ASIO. Se non lo trova, selezionarlo in **Parametri → Dispositivo di ingresso**.
+Il dispositivo si sceglie nel menu **Dispositivo** della scheda Live (per ID, es. `1: Linea (UMA16v2) [MME]`).
+Se il menu è vuoto, il programma cerca da solo la UMA-16 (vedi *Problemi comuni*).
 Senza hardware si può provare tutto con la sorgente **Simulatore**: un drone virtuale con armoniche
 della frequenza di passaggio pala, vento e cinguettii.
 
@@ -27,7 +27,8 @@ della frequenza di passaggio pala, vento e cinguettii.
 | `main.py` | Interfaccia Bokeh (schede Live, Traiettoria, Calibrazione, Rumore/Ambiente, Addestramento, Parametri, Analisi offline, Guida) |
 | `processing.py` | FFT/CSM, beamforming a banda larga (Convenzionale, Funzionale, Capon/MVDR, MUSIC), indice di direzionalità, spettro focalizzato |
 | `audio_io.py` | Acquisizione UMA-16 (sounddevice), riproduzione di file h5/wav, simulatore, registrazione HDF5 compatibile con acoular |
-| `geometry.py` | Geometria UMA-16 (xml acoular o tabella interna), orientamento, griglie emisfero (u,v) e piano (x,y @ z) |
+| `geometry.py` | Geometria UMA-16, orientamento, griglie emisfero (u,v) e piano (x,y @ z) |
+| `geometries/minidsp_uma-16_corrected.xml` | Geometria corretta della UMA-16 (predefinita). Il file acoular `minidsp_uma-16.xml` ha le x specchiate; coincide con `minidsp_uma-16_mirrored.xml` |
 | `calibration.py` | Verifica canali, guadagni, fase, orientamento automatico, SPL assoluto |
 | `noise.py` | Profilo del rumore di fondo, aggiornamento adattivo, analisi automatica dell'ambiente |
 | `signature.py` | Impronta acustica: caratteristiche spettrali e armoniche, RandomForest, pesi di frequenza |
@@ -43,6 +44,23 @@ aggiornamenti ogni 250 ms il motore live è scritto in numpy vettorizzato, con l
 di acoular. La catena acoular originale è mantenuta nella scheda **Analisi offline**, con CleanSC,
 DAMAS e altri metodi, per verificare le registrazioni.
 
+## Configurazione e geometria
+
+- **Dove si salva**: `data/config.json`, nella cartella `data` accanto a `main.py`. Il percorso esatto
+  è indicato sotto il titolo dell'app. Ogni modifica (Parametri, banda, metodo, preset, orientamento,
+  dispositivo) viene salvata subito e ricaricata all'avvio successivo. Nella stessa cartella si trovano
+  anche `calibration.json`, `noise_profile.npz`, `signature_model.pkl`, `recordings/*.h5` e le
+  traiettorie in CSV.
+- **Geometria microfoni** (scheda Parametri, applicata subito):
+  - `minidsp_uma-16_corrected.xml`: file del progetto (`geometries/`), **predefinito e corretto**;
+  - `acoular: minidsp_uma-16.xml`: file originale di acoular, con le x specchiate;
+  - `acoular: minidsp_uma-16_mirrored.xml`: file acoular con x ribaltata, identico a quello corretto;
+  - `interna (UMA-16 corretta)`: tabella nel codice, identica a quella corretta; si usa se manca il file xml.
+- **Schema microfoni sulla mappa**: al centro della Mappa sorgente, ingrandito. Il numero è il canale
+  USB (0–15, lo stesso di "Canali esclusi"); il nome nel file xml (es. "MIC 1") compare passando il
+  mouse. I canali esclusi sono in rosso. Tutte le geometrie UMA-16 hanno le stesse 16 posizioni:
+  cambia solo quale canale sta in quale posizione, quindi si verifica leggendo i numeri.
+
 ## Procedura di messa a punto
 
 1. **Parametri**: indicare la temperatura (da cui si calcola la velocità del suono), la griglia
@@ -52,9 +70,8 @@ DAMAS e altri metodi, per verificare le registrazioni.
    - *Verifica canali*: segnala i canali morti, rumorosi o scorrelati; *Applica canali suggeriti* li esclude.
    - *Guadagni*: altoparlante **fisso** in asse (x=0, y=0, z ≥ 1,5 m). La calibrazione di *fase* è opzionale.
    - *Orientamento*: altoparlante fuori asse in una posizione nota (es. x=+1, y=0, z=2). Il programma prova
-     le 8 combinazioni di ribaltamento/scambio degli assi e sceglie quella corretta. Questo risolve
-     l'ambiguità nota di acoular tra `minidsp_uma-16.xml` e `_mirrored.xml` (dipende da quale lato
-     guarda l'array).
+     le 8 combinazioni di ribaltamento/scambio degli assi e sceglie quella corretta (verifica di sicurezza
+     sulla geometria).
    - *SPL*: fonometro accanto all'array, inserire il valore letto.
 4. **Rumore / Ambiente** (sul campo, **senza drone**): *Autocalibrazione ambiente*.
 5. **Addestramento**:
@@ -108,8 +125,16 @@ lentamente l'ambiente, ma solo quando non c'è rilevamento e l'SNR è basso.
 
 ## Problemi comuni
 
-- **Solo 2 canali o dispositivo non trovato**: installare il driver ASIO miniDSP e usare sounddevice
-  ≥ 0.4.6. La variabile `SD_ENABLE_ASIO=1` è già impostata dal programma.
+- **Scelta del dispositivo**: nel menu *Dispositivo* (scheda Live o Parametri) ogni voce è
+  `ID: nome [API] (canali)`, con gli stessi ID di `sd.query_devices()`. Se lo lasci vuoto, il
+  programma prova i dispositivi con "UMA16", "miniDSP" o "MCHStreamer" e almeno 16 canali, in questo
+  ordine: WASAPI, MME, DirectSound, WDM-KS e, per ultimo, ASIO. Usa il primo che si apre.
+  La scelta viene salvata in `data/config.json`.
+- **"Failed to load ASIO driver"**: il driver ASIO miniDSP non è installato o non è caricabile.
+  Scegliere il dispositivo MME/WASAPI (es. `1: Linea (UMA16v2) [MME] (16 ch)`). ASIO è disattivato
+  per impostazione predefinita; si attiva con *Parametri → Abilita ASIO* e poi riavviando l'app.
+- **Solo 2 canali**: installare il driver miniDSP UAC2 e verificare in Windows (Impostazioni audio →
+  Registrazione) che l'ingresso UMA-16 sia configurato a 16 canali, 48 kHz.
 - **La sorgente appare speculare**: eseguire *Determina orientamento* oppure spuntare flip x/y.
 - **Rilevamenti falsi**: registrare di nuovo il fondo, alzare la soglia di direzionalità o di SNR,
   attivare il classificatore.

@@ -22,12 +22,13 @@ def speed_of_sound(temp_c: float, rel_humidity: float = 50.0) -> float:
 class AppConfig:
     # --- acquisizione -------------------------------------------------------
     source: str = 'UMA-16 (live)'          # 'UMA-16 (live)' | 'File (h5/wav)' | 'Simulatore'
-    device_name: str = ''                  # vuoto = ricerca automatica 'UMA16' / 'miniDSP'
+    device_name: str = ''                  # vuoto = ricerca automatica; oppure ID, es. '1'
+    use_asio: bool = False                 # abilita ASIO (serve il driver ASIO miniDSP; riavvio app)
     sample_rate: int = 48000
     num_channels: int = 16
     replay_file: str = ''
     # --- geometria ------------------------------------------------------------
-    geometry: str = 'minidsp_uma-16.xml'   # file xml acoular oppure 'interna (UMA-16)'
+    geometry: str = 'minidsp_uma-16_corrected.xml'   # file in geometries/, 'acoular: <file>' o 'interna ...'
     flip_x: bool = False
     flip_y: bool = False
     swap_xy: bool = False
@@ -102,7 +103,20 @@ class AppConfig:
             for k, v in data.items():
                 if k in names:
                     setattr(cfg, k, v)
+            cfg._migrate_geometry()
         return cfg
+
+    def _migrate_geometry(self):
+        """Le configurazioni salvate con il file acoular 'minidsp_uma-16.xml' (x specchiate) o con la
+        vecchia tabella interna passano alla geometria corretta; i ribaltamenti vanno rifatti."""
+        old = {'minidsp_uma-16.xml', 'interna (UMA-16)'}   # nomi usati dalle versioni precedenti
+        if self.geometry in old:
+            self.geometry = 'minidsp_uma-16_corrected.xml'
+            self.flip_x = self.flip_y = self.swap_xy = False
+            self.geometry_migrated = True
+        elif not self.geometry.startswith(('acoular: ', 'interna')) and '/' not in self.geometry \
+                and '\\' not in self.geometry and not (APP_DIR / 'geometries' / self.geometry).exists():
+            self.geometry = 'acoular: ' + self.geometry   # altro file acoular salvato senza prefisso
 
 
 # Preset ambientali: valori suggeriti per la riduzione del rumore di fondo.

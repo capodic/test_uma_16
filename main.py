@@ -22,7 +22,6 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-os.environ.setdefault('SD_ENABLE_ASIO', '1')
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
@@ -30,8 +29,6 @@ try:  # acoular va importato prima di numpy (parallelismo numba)
     import acoular  # noqa: F401,E402
 except Exception:
     acoular = None
-from time import sleep
-sleep(10)
 import numpy as np  # noqa: E402
 from bokeh.io import curdoc  # noqa: E402
 from bokeh.layouts import column, row  # noqa: E402
@@ -152,10 +149,16 @@ class DroneApp:
         header = Div(text='<h2 style="margin:4px 0">UMA-16 Drone Locator</h2>'
                           '<span style="color:#666">Beamforming in tempo reale, spettro, traiettoria, '
                           'calibrazione, riduzione del rumore e riconoscimento dell\'impronta acustica</span>')
-        self.root = column(header, self.tabs, sizing_mode='stretch_width')
+        self.cfg_div = Div(text='')
+        self.root = column(header, self.cfg_div, self.tabs, sizing_mode='stretch_width')
         doc.add_root(self.root)
         doc.title = 'UMA-16 Drone Locator'
         doc.on_session_destroyed(self._on_destroy)
+        if getattr(self.cfg, 'geometry_migrated', False):
+            self.cfg.to_json()
+            self.status('Geometria aggiornata a "minidsp_uma-16_corrected.xml" (il file acoular '
+                        'minidsp_uma-16.xml ha le x specchiate). Ribaltamenti azzerati: ripetere '
+                        '"Determina orientamento" se serve.')
         self._refresh_grid_view()
 
     # ------------------------------------------------------------------ utilita'
@@ -169,10 +172,32 @@ class DroneApp:
     def _update_signature_weights(self):
         self.proc.signature_weights = self.model.frequency_weights(self.proc.freqs) if self.model.trained else None
 
+    def _mic_names(self, n):
+        """Nomi dei punti letti dal file xml (es. 'MIC 1'), per il tooltip."""
+        try:
+            import xml.etree.ElementTree as ET
+
+            from geometry import resolve_geometry
+            p = resolve_geometry(self.cfg.geometry)
+            if p is not None and p.exists():
+                names = [e.get('Name', '') for e in ET.parse(p).getroot().iter('pos')]
+                if len(names) == n:
+                    return names
+        except Exception:
+            pass
+        return [f'MIC {i + 1}' for i in range(n)]
+
+    def save_config(self):
+        try:
+            self.cfg.to_json()
+        except Exception as exc:
+            self.status(f'Impossibile salvare la configurazione: {exc}', err=True)
+
     def rebuild(self):
-        """Ricostruisce il processore (griglia, steering) dopo cambi di parametri."""
+        """Ricostruisce il processore (griglia, steering) dopo cambi di parametri e salva la configurazione."""
         try:
             self.proc = Processor(self.cfg, self.calib, self.noise)
+            self.save_config()
             self._update_signature_weights()
             gsig = (self.cfg.grid_mode, self.cfg.x_min, self.cfg.x_max, self.cfg.y_min, self.cfg.y_max, self.cfg.z)
             if gsig != getattr(self, '_grid_sig', gsig):   # coordinate cambiate: la traccia non e' piu' valida
@@ -190,6 +215,10 @@ class DroneApp:
         cfg = self.cfg
         # --- controlli
         self.src_select = Select(title='Sorgente segnale', options=SOURCES, value=cfg.source, width=170)
+        self.dev_live = Select(title='Dispositivo (vuoto = automatico)', width=350,
+                               options=[''] + audio_io.list_input_devices(1))
+        self.dev_live.value = self._match_device(cfg.device_name, self.dev_live.options)
+        self.dev_live.on_change('value', lambda a, o, n: self._set_device(n))
         self.run_toggle = Toggle(label='▶ Avvia acquisizione', button_type='success', width=190, height=50)
         self.run_toggle.on_change('active', self._on_run)
         self.rec_toggle = Toggle(label='● Registra (h5)', button_type='danger', width=140, height=50)
@@ -227,9 +256,17 @@ class DroneApp:
         self.horizon_src = ColumnDataSource(data=dict(xs=[], ys=[]))
         self.map_fig.multi_line('xs', 'ys', source=self.horizon_src, line_color='#9e9e9e', line_alpha=0.6,
                                 line_dash='dotted')
-        self.mic_src = ColumnDataSource(data=dict(x=[], y=[], ch=[]))
-        mic_r = self.map_fig.scatter('x', 'y', source=self.mic_src, marker='circle_cross', size=12,
-                                     fill_alpha=0.2, line_color='#1e3246')
+        # schema dei microfoni (ingrandito, centrato): numero = canale USB (0-15), come in "Canali esclusi"
+        self.mic_src = ColumnDataSource(data=dict(x=[], y=[], ch=[], lab=[], mic=[], xmm=[], ymm=[], color=[]))
+        mic_r = self.map_fig.scatter('x', 'y', source=self.mic_src, marker='circle', size=20,
+                                     fill_color='white', fill_alpha=0.75, line_color='color', line_width=2)
+        self.mic_labels = LabelSet(x='x', y='y', text='lab', source=self.mic_src, text_align='center',
+                                   text_baseline='middle', text_font_size='9pt', text_color='color')
+        self.map_fig.add_layout(self.mic_labels)
+        self.mic_r = mic_r
+        self.show_mics = checkbox('Mostra schema microfoni (numero = canale)', True)
+        self.show_mics.on_change('active', lambda a, o, n: (setattr(self.mic_r, 'visible', 0 in n),
+                                                           setattr(self.mic_labels, 'visible', 0 in n)))
         self.trail_src = ColumnDataSource(data=dict(x=[], y=[]))
         self.map_fig.line('x', 'y', source=self.trail_src, line_color='white', line_width=2, line_alpha=0.8)
         self.peak_src = ColumnDataSource(data=dict(x=[], y=[]))
@@ -243,7 +280,8 @@ class DroneApp:
         self.map_fig.legend.location = 'top_left'
         self.map_fig.legend.background_fill_alpha = 0.3
         self.map_fig.add_tools(HoverTool(tooltips=[('dB', '@image{0.0}')], renderers=[img]))
-        self.map_fig.add_tools(HoverTool(tooltips=[('microfono', '@ch')], renderers=[mic_r]))
+        self.map_fig.add_tools(HoverTool(tooltips=[('canale', '@ch'), ('nome xml', '@mic'),
+                                                   ('posizione (mm)', '(@xmm, @ymm)')], renderers=[mic_r]))
 
         # --- spettro (come "Sector-Integrated Spectrum" di bf_example_app)
         self.spec_mode = Select(title='Spettro', options=SPEC_MODES, value=SPEC_MODES[0], width=220)
@@ -282,8 +320,9 @@ class DroneApp:
 
         controls = column(
             row(self.src_select, self.method_select),
+            self.dev_live,
             row(self.run_toggle, self.rec_toggle),
-            self.band_slider, self.dyn_slider, self.thr_slider, self.snr_slider, self.clear_btn,
+            self.band_slider, self.dyn_slider, self.thr_slider, self.snr_slider, self.show_mics, self.clear_btn,
             self.info_div,
         )
         self.live_layout = column(
@@ -292,10 +331,31 @@ class DroneApp:
                                              self.sg_range, self.sg_fig), controls),
         )
 
+    @staticmethod
+    def _match_device(name, options):
+        """Trova nell'elenco la voce del dispositivo salvato (per ID)."""
+        did = audio_io.device_id(name)
+        if did is None:
+            return ''
+        return next((o for o in options if audio_io.device_id(o) == did), '')
+
+    def _set_device(self, value):
+        self.cfg.device_name = value
+        for w in (getattr(self, 'dev_live', None), getattr(self, 'dev_select', None)):
+            if w is not None and w.value != value:
+                if value not in w.options:
+                    w.options = list(w.options) + [value]
+                w.value = value
+        self.cfg.to_json()
+        if value:
+            self.status(f'Dispositivo selezionato: {value}. Premere Avvia acquisizione.')
+
     def _set(self, attr, value, rebuild=True):
         setattr(self.cfg, attr, value)
         if rebuild:
             self.rebuild()
+        else:
+            self.save_config()
 
     def _on_band(self, _a, _o, new):
         self.cfg.f_min, self.cfg.f_max = float(new[0]), float(new[1])
@@ -318,11 +378,26 @@ class DroneApp:
         self.map_fig.yaxis.axis_label = 'v = sin(θ)sin(φ)' if uv else 'y / m'
         self.horizon_src.data = horizon_lines() if uv else dict(xs=[], ys=[])
         pos = self.proc.pos_all
-        if uv:   # l'array (13 cm) e' disegnato ingrandito al centro per riferimento dell'orientamento
-            k = 0.12 / 0.063
-        else:
-            k = 1.0
-        self.mic_src.data = dict(x=list(pos[0] * k), y=list(pos[1] * k), ch=list(range(pos.shape[1])))
+        # l'array (12.6 cm) e' disegnato ingrandito al centro della mappa (circa 1/3 della larghezza),
+        # con gli stessi assi x, y della mappa: serve a verificare geometria e orientamento
+        half = 0.17 * (x1 - x0) / 2
+        k = half / max(np.abs(pos[:2]).max(), 1e-6)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        n = pos.shape[1]
+        inv = set(int(i) for i in self.cfg.invalid_channels)
+        names = self._mic_names(n)
+        self.mic_src.data = dict(x=list(cx + pos[0] * k), y=list(cy + pos[1] * k), ch=list(range(n)),
+                                 lab=[str(i) for i in range(n)], mic=names,
+                                 xmm=[round(v * 1000, 1) for v in pos[0]], ymm=[round(v * 1000, 1) for v in pos[1]],
+                                 color=['#b00020' if i in inv else '#1e3246' for i in range(n)])
+        flips = [t for t, v in (('flip x', self.cfg.flip_x), ('flip y', self.cfg.flip_y),
+                                ('scambia x/y', self.cfg.swap_xy)) if v]
+        self.map_fig.title.text = f'Mappa sorgente — geometria: {self.cfg.geometry}' + \
+            (f' ({", ".join(flips)})' if flips else '')
+        if hasattr(self, 'cfg_div'):
+            self.cfg_div.text = (f'<span style="color:#666">Configurazione: <code>{DEFAULT_CONFIG_FILE}</code> · '
+                                 f'geometria in uso: <b>{self.cfg.geometry}</b>'
+                                 + (f' ({", ".join(flips)})' if flips else '') + '</span>')
         if hasattr(self, 'traj_fig'):
             for f in (self.traj_fig,):
                 f.x_range.start, f.x_range.end = x0 - pad, x1 + pad
@@ -1002,10 +1077,13 @@ mappa sulle bande tipiche del drone.''')
         cfg = self.cfg
         devs = audio_io.list_input_devices(1)
         self.dev_select = Select(title='Dispositivo di ingresso (vuoto = ricerca automatica UMA-16)',
-                                 options=[''] + devs, value=cfg.device_name if cfg.device_name in devs else '',
+                                 options=[''] + devs, value=self._match_device(cfg.device_name, [''] + devs),
                                  width=460)
+        self.dev_select.on_change('value', lambda a, o, n: self._set_device(n))
         ref = Button(label='Aggiorna elenco dispositivi', width=200)
-        ref.on_click(lambda: setattr(self.dev_select, 'options', [''] + audio_io.list_input_devices(1)))
+        ref.on_click(self._refresh_devices)
+        self.asio_cb = checkbox('Abilita ASIO (serve il driver ASIO miniDSP; riavviare l\'app)', cfg.use_asio)
+        self.asio_cb.on_change('active', self._on_asio)
         self.p = {}
         self.p['sample_rate'] = Select(title='Frequenza di campionamento', value=str(cfg.sample_rate),
                                        options=['48000', '44100', '32000', '16000', '11025'], width=150)
@@ -1013,10 +1091,15 @@ mappa sulle bande tipiche del drone.''')
         self.rec_select.on_change('value', lambda a, o, n: setattr(self.p['replay_file'], 'value', n) if n else None)
         self.p['replay_file'] = TextInput(title='File da riprodurre (.h5 acoular / .wav 16 canali)',
                                           value=cfg.replay_file, width=460)
-        self.p['geometry'] = Select(title='Geometria microfoni', options=available_geometries(), value=cfg.geometry,
-                                    width=260)
+        geos = available_geometries()
+        if cfg.geometry not in geos:
+            geos.insert(0, cfg.geometry)
+        self.p['geometry'] = Select(title='Geometria microfoni (applicata subito)', options=geos,
+                                    value=cfg.geometry, width=300)
+        self.p['geometry'].on_change('value', self._on_geometry)
         self.invalid_mc = MultiChoice(title='Canali esclusi', options=[str(i) for i in range(16)],
                                       value=[str(i) for i in cfg.invalid_channels], width=460)
+        self.invalid_mc.on_change('value', lambda a, o, n: self._set('invalid_channels', sorted(int(v) for v in n)))
         self.p['temperature_c'] = sp('Temperatura (°C)', cfg.temperature_c, 0.5, -30, 50)
         self.p['humidity'] = sp('Umidità (%)', cfg.humidity, 5, 0, 100)
         self.c_div = Div(text=f'c = {cfg.c:.1f} m/s')
@@ -1051,8 +1134,8 @@ mappa sulle bande tipiche del drone.''')
         load_b.on_click(self._load_config)
         note = Div(width=900, text='''
 <b>Note sui parametri</b><br>
-• <b>UMA-16 su Windows</b>: per 16 canali installare il driver miniDSP UAC2/ASIO; il programma cerca
-automaticamente un dispositivo con "UMA16"/"miniDSP" e ≥16 canali, preferendo ASIO.<br>
+• <b>UMA-16 su Windows</b>: scegliere il dispositivo per ID (es. "1: Linea (UMA16v2) [MME] (16 ch)").
+Se vuoto, prova in ordine WASAPI, MME, DirectSound, ASIO. ASIO solo se il driver ASIO miniDSP è installato.<br>
 • <b>Banda utile</b>: con apertura di 12.6 cm la risoluzione sotto ~800 Hz è molto scarsa; sopra
 c/(2·0.042) ≈ 4.1 kHz compaiono lobi di aliasing spaziale (attenuati dalla somma a banda larga). Per i droni
 (frequenza di passaggio pala 100–400 Hz + armoniche fino a diversi kHz) la banda 0.8–6 kHz è un buon compromesso.<br>
@@ -1060,7 +1143,7 @@ c/(2·0.042) ≈ 4.1 kHz compaiono lobi di aliasing spaziale (attenuati dalla so
 <b>piano (x,y @ z)</b> come in bf_example_app, utile in laboratorio con sorgente a distanza nota.<br>
 • L'array è piano: la <b>distanza</b> di una sorgente lontana non è stimabile, solo la direzione.''')
         self.param_layout = column(
-            row(self.dev_select, ref, self.p['sample_rate']),
+            row(self.dev_select, ref, self.p['sample_rate'], self.asio_cb),
             row(self.p['replay_file'], self.rec_select),
             row(self.p['geometry'], self.invalid_mc),
             row(self.p['temperature_c'], self.p['humidity'], self.c_div, self.p['block_size'], self.p['window_s'],
@@ -1072,6 +1155,17 @@ c/(2·0.042) ≈ 4.1 kHz compaiono lobi di aliasing spaziale (attenuati dalla so
             row(apply_b, save_b, load_b), note)
         self._refresh_recordings()
 
+    def _refresh_devices(self):
+        opts = [''] + audio_io.list_input_devices(1)
+        for w in (self.dev_live, self.dev_select):
+            w.options = opts
+            w.value = self._match_device(self.cfg.device_name, opts)
+
+    def _on_asio(self, _a, _o, new):
+        self.cfg.use_asio = 0 in new
+        self.cfg.to_json()
+        self.status('Impostazione ASIO salvata: chiudere e riavviare l\'applicazione per applicarla.')
+
     def _refresh_recordings(self):
         files = sorted((str(p) for p in REC_DIR.glob('*.h5')), reverse=True)
         self.rec_select.options = [''] + files
@@ -1081,7 +1175,6 @@ c/(2·0.042) ≈ 4.1 kHz compaiono lobi di aliasing spaziale (attenuati dalla so
     def _apply_params(self):
         cfg = self.cfg
         old_fs = cfg.sample_rate
-        cfg.device_name = self.dev_select.value
         for k, w in self.p.items():
             if isinstance(w, CheckboxGroup):
                 v = cb_val(w)
@@ -1108,8 +1201,17 @@ c/(2·0.042) ≈ 4.1 kHz compaiono lobi di aliasing spaziale (attenuati dalla so
             msg += ' Riavviare l\'acquisizione per la nuova frequenza di campionamento.'
         self.status(msg)
 
+    def _on_geometry(self, _a, _o, new):
+        self.cfg.geometry = new
+        self.rebuild()
+        self.status(f'Geometria "{new}" applicata e salvata. Lo schema dei microfoni al centro della mappa '
+                    'mostra il numero di canale di ogni posizione.')
+
     def _load_config(self):
         self.cfg.__dict__.update(AppConfig.from_json().__dict__)
+        self.orient_cb.active = [i for i, v in enumerate([self.cfg.flip_x, self.cfg.flip_y, self.cfg.swap_xy]) if v]
+        for w in (self.dev_live, self.dev_select):
+            w.value = self._match_device(self.cfg.device_name, w.options)
         for k, w in self.p.items():
             v = getattr(self.cfg, k)
             if isinstance(w, CheckboxGroup):

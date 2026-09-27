@@ -1,0 +1,21 @@
+<?xml version="1.1" encoding="utf-8"?>
+<MicArray name="minidsp_uma16">
+   <!-- Correct sensor positions for miniDSP UMA-16 MEMS microphone array -->
+   <!-- Grid 4x4 with 4.2cm spacing centered at (0,0) -->
+   <pos Name="MIC 1" x="-0.021" y="-0.063" z="0.0"/>
+   <pos Name="MIC 2" x="-0.063" y="-0.063" z="0.0"/>
+   <pos Name="MIC 3" x="-0.021" y="-0.021" z="0.0"/>
+   <pos Name="MIC 4" x="-0.063" y="-0.021" z="0.0"/>
+   <pos Name="MIC 5" x="-0.021" y="0.021" z="0.0"/>
+   <pos Name="MIC 6" x="-0.063" y="0.021" z="0.0"/>
+   <pos Name="MIC 7" x="-0.021" y="0.063" z="0.0"/>
+   <pos Name="MIC 8" x="-0.063" y="0.063" z="0.0"/>
+   <pos Name="MIC 9" x="0.063" y="0.063" z="0.0"/>
+   <pos Name="MIC 10" x="0.021" y="0.063" z="0.0"/>
+   <pos Name="MIC 11" x="0.063" y="0.021" z="0.0"/>
+   <pos Name="MIC 12" x="0.021" y="0.021" z="0.0"/>
+   <pos Name="MIC 13" x="0.063" y="-0.021" z="0.0"/>
+   <pos Name="MIC 14" x="0.021" y="-0.021" z="0.0"/>
+   <pos Name="MIC 15" x="0.063" y="-0.063" z="0.0"/>
+   <pos Name="MIC 16" x="0.021" y="-0.063" z="0.0"/>
+</MicArray>
